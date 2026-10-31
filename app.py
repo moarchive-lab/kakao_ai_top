@@ -111,7 +111,6 @@ def kakao_response(text: str, utterance: str = "") -> dict:
             "textCard": {
                 "title": title,
                 "description": text,
-                "buttons": [_message_button(label, message) for label, message in suggestions[:3]],
             }
         }
     else:
