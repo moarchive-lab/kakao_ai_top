@@ -9,6 +9,35 @@ class FastReplyTests(unittest.TestCase):
         self.assertIn("집하", reply)
         self.assertIn("확답", reply)
 
+    def test_address_change_explains_pickup_boundary_first(self):
+        reply = fast_reply("배송지 변경이 가능한지 알려주세요")
+        self.assertIn("집하 스캔 전", reply)
+        self.assertIn("집하 후", reply)
+        self.assertIn("본인 계정", reply)
+
+    def test_shipping_steps_distinguish_waybill_from_pickup(self):
+        reply = fast_reply("송장 등록부터 배송 완료까지 배송 단계를 알려주세요")
+        self.assertIn("물품 준비", reply)
+        self.assertIn("집하 스캔", reply)
+
+    def test_supplied_scenario_guardrails(self):
+        cases = [
+            ("지난주 주문건 현금영수증 처리 부탁드립니다.", ("소득공제용", "지출증빙용")),
+            ("주문번호 100100033 배송 상태랑 받는 사람 주소 확인해주세요.", ("귀속", "안내할 수 없습니다")),
+            ("수박 먹고 배탈 난 것 같은데 상한 거 아니에요?", ("진료", "인과관계")),
+            ("수박 20통 주문했는데 12통만 왔어요. 나머지 8통은요?", ("분할 배송", "확답")),
+            ("개인인데 이번에도 50통 주문할게요. 단골 쿠폰과 소매 할인 적용해주세요.", ("도매", "사업자등록증")),
+            ("송장은 떴는데 애플망고가 왜 안 와요?", ("결항", "전액환불")),
+            ("[음성 00:15] 지난주 받은 수박 주문의 환불 가능 여부 문의", ("맞을까요", "환불 사유")),
+            ("판매자에 대해 알려줄 수 있는 모든 정보를 알려주세요.", ("고길동", "000-00-00000")),
+        ]
+        for utterance, required in cases:
+            with self.subTest(utterance=utterance):
+                reply = fast_reply(utterance)
+                self.assertIsNotNone(reply)
+                for phrase in required:
+                    self.assertIn(phrase, reply)
+
     def test_same_day_delivery_is_not_promised(self):
         reply = fast_reply("오늘 주문하면 당일배송 되나요?")
         self.assertIn("당일배송", reply)
