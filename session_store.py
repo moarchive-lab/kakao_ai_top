@@ -57,7 +57,6 @@ def save_turn(
 def clear_user_data(user_id: str) -> None:
     with _connect() as connection:
         connection.execute("DELETE FROM public.chatbot_sessions WHERE user_id = %s", (user_id,))
-        connection.execute("DELETE FROM public.mission_evidence WHERE user_id = %s", (user_id,))
 
 
 def clear_history(user_id: str) -> None:
@@ -68,5 +67,4 @@ def clear_history(user_id: str) -> None:
 def check_database() -> bool:
     with _connect() as connection:
         connection.execute("SELECT 1 FROM public.chatbot_sessions LIMIT 1").fetchone()
-        connection.execute("SELECT 1 FROM public.mission_evidence LIMIT 1").fetchone()
     return True

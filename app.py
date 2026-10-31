@@ -105,7 +105,7 @@ async def skill(request: Request):
             try:
                 await asyncio.to_thread(clear_user_data, user_id)
                 return JSONResponse(
-                    kakao_response("저장된 조사 메모와 대화 기억을 삭제했어요. 카카오톡 채팅방의 과거 메시지는 별도로 남아 있을 수 있습니다.")
+                    kakao_response("저장된 서버 대화 기억을 삭제했어요. 카카오톡 채팅방의 과거 메시지는 별도로 남아 있을 수 있습니다.")
                 )
             except Exception:
                 logger.warning("Could not delete stored user data")
