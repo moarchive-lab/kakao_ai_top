@@ -18,9 +18,12 @@ from session_store import (
     check_database,
     clear_history,
     clear_user_data,
+    create_case,
     get_history,
+    list_recent_cases,
     save_turn,
 )
+from workflow import build_case_draft, intake_category, status_label
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("kakao-skill")
@@ -66,44 +69,51 @@ def kakao_response(text: str, utterance: str = "") -> dict:
     title = "🌿 교동마을 AX 안내"
     suggestions = [
         ("배송 문의", "배송 상태가 궁금해요"),
-        ("혜택 문의", "현재 사용할 수 있는 혜택을 알려주세요"),
-        ("체험 문의", "체험 예약 방법을 알려주세요"),
+        ("일반 문의 접수", "일반 문의 접수"),
+        ("내 문의 상태", "내 문의 상태"),
     ]
 
     if any(word in query for word in ("송장", "배송", "도착", "출고", "집하")):
         title = "📦 배송 상태 안내"
         suggestions = [
             ("배송 단계", "송장 등록부터 배송 완료까지 단계를 알려주세요"),
-            ("주소 변경", "배송지 변경이 가능한지 알려주세요"),
-            ("지연 대응", "배송이 지연될 때 선택할 수 있는 방법을 알려주세요"),
+            ("배송 확인 접수", "배송 확인 접수"),
+            ("내 문의 상태", "내 문의 상태"),
         ]
     elif any(word in query for word in ("쿠폰", "할인", "혜택", "적립금", "프로모션")):
         title = "🎟️ 혜택 적용 안내"
         suggestions = [
             ("중복 기준", "할인과 쿠폰 중복 기준을 알려주세요"),
-            ("현재 혜택", "현재 사용할 수 있는 혜택을 알려주세요"),
-            ("적용 실패", "쿠폰이 적용되지 않는 이유를 확인하고 싶어요"),
+            ("혜택 확인 접수", "혜택 확인 접수"),
+            ("내 문의 상태", "내 문의 상태"),
         ]
     elif any(word in query for word in ("체험", "가예약", "예약", "인솔")):
         title = "🌱 체험 가예약 안내"
         suggestions = [
             ("준비물", "체험 준비물을 알려주세요"),
-            ("예약 절차", "체험 예약 절차를 알려주세요"),
-            ("취소 기준", "체험 취소와 환불 기준을 알려주세요"),
+            ("가예약 접수", "가예약 접수"),
+            ("내 문의 상태", "내 문의 상태"),
         ]
     elif any(word in query for word in ("비밀번호", "인증번호", "개인정보", "다른 사람", "타인", "주소", "연락처")):
         title = "🔒 개인정보 보호 안내"
         suggestions = [
             ("본인 확인", "본인 확인에 필요한 정보를 알려주세요"),
-            ("정보 정정", "내 개인정보를 정정하고 싶어요"),
-            ("기록 삭제", "기록 삭제"),
+            ("개인정보 요청", "개인정보 요청 접수"),
+            ("내 문의 상태", "내 문의 상태"),
         ]
     elif any(word in query for word in ("곰팡이", "부패", "상했", "아픈", "이물", "병원")):
         title = "⚠️ 안전 우선 안내"
         suggestions = [
             ("사진 준비", "품질 문제 사진은 어떻게 찍어야 하나요?"),
-            ("환불 기준", "하자 상품 환불 기준을 알려주세요"),
-            ("재배송", "하자 상품 재배송 절차를 알려주세요"),
+            ("안전 검토 접수", "안전 검토 접수"),
+            ("내 문의 상태", "내 문의 상태"),
+        ]
+    elif any(word in query for word in ("하자", "파손", "무름", "중량", "당도", "품질")):
+        title = "📸 상품 품질 확인"
+        suggestions = [
+            ("사진 준비", "품질 문제 사진은 어떻게 찍어야 하나요?"),
+            ("품질 확인 접수", "품질 확인 접수"),
+            ("내 문의 상태", "내 문의 상태"),
         ]
 
     if len(text) <= 390:
@@ -122,6 +132,78 @@ def kakao_response(text: str, utterance: str = "") -> dict:
             "outputs": [output],
             "quickReplies": [
                 _message_button(label, message) for label, message in suggestions[:3]
+            ],
+        },
+    }
+
+
+def case_created_response(case: dict) -> dict:
+    priority_labels = {
+        "NORMAL": "일반",
+        "HIGH": "높음",
+        "URGENT": "긴급",
+        "LOW": "낮음",
+    }
+    lines = [
+        f"접수번호: {case['public_id']}",
+        f"상태: {status_label(case['status'])}",
+        f"담당: {case['assignee_role']}",
+        f"우선순위: {priority_labels.get(case['priority'], case['priority'])}",
+    ]
+    missing_fields = case.get("missing_fields") or []
+    if missing_fields:
+        lines.append(f"추가 확인: {', '.join(missing_fields)}")
+    if case.get("requires_approval"):
+        lines.append("담당 검토 후 조합 승인까지 완료되어야 최종 확정됩니다.")
+    else:
+        lines.append("접수는 처리 완료와 다르며, 담당자가 기록을 확인한 뒤 상태가 변경됩니다.")
+    card_title = f"🔁 기존 {case['title']} 접수 확인" if case.get("duplicate") else f"✅ {case['title']} 접수 완료"
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [
+                {
+                    "textCard": {
+                        "title": card_title,
+                        "description": "\n".join(lines),
+                    }
+                }
+            ],
+            "quickReplies": [
+                _message_button("내 문의 상태", "내 문의 상태"),
+                _message_button("새 문의", "처음부터"),
+            ],
+        },
+    }
+
+
+def recent_cases_response(cases: list[dict]) -> dict:
+    if not cases:
+        description = "아직 접수된 업무 건이 없습니다. 문의 내용을 남긴 뒤 화면의 접수 버튼을 눌러 주세요."
+    else:
+        chunks = []
+        for case in cases[:3]:
+            missing = case.get("missing_fields") or []
+            suffix = f" · 추가 확인 {len(missing)}건" if missing else ""
+            chunks.append(
+                f"{case['public_id']}\n{case['title']} · {status_label(case['status'])}{suffix}"
+            )
+        description = "\n\n".join(chunks)
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [
+                {
+                    "textCard": {
+                        "title": "🗂️ 내 문의 상태",
+                        "description": description,
+                    }
+                }
+            ],
+            "quickReplies": [
+                _message_button("새 문의", "처음부터"),
+                _message_button("배송 문의", "배송 상태가 궁금해요"),
+                _message_button("체험 문의", "체험 예약 방법을 알려주세요"),
             ],
         },
     }
@@ -196,6 +278,43 @@ async def skill(request: Request):
         else:
             # Never combine unrelated people into a shared anonymous history.
             history = []
+
+        if utterance == "내 문의 상태":
+            if not user_id:
+                return JSONResponse(kakao_response("카카오 사용자 식별값을 확인할 수 없어 접수 상태를 조회할 수 없습니다."))
+            try:
+                cases = await asyncio.to_thread(list_recent_cases, user_id, 5)
+                return JSONResponse(recent_cases_response(cases))
+            except Exception:
+                logger.exception("Could not list AX cases")
+                return JSONResponse(kakao_response("접수 상태를 불러오지 못했어요. 잠시 후 다시 시도해 주세요."))
+
+        category = intake_category(utterance)
+        if category:
+            if not user_id:
+                return JSONResponse(
+                    kakao_response("카카오 사용자 식별값을 확인할 수 없어 업무 건을 접수하지 못했어요. 채널 채팅에서 다시 시도해 주세요.")
+                )
+            draft = build_case_draft(category, history, utterance)
+            try:
+                case = await asyncio.to_thread(create_case, user_id, draft)
+            except Exception:
+                logger.exception("Could not create AX case")
+                return JSONResponse(
+                    kakao_response("업무 건을 저장하지 못해 접수가 완료되지 않았습니다. 잠시 후 다시 접수해 주세요.")
+                )
+            if session_store_available:
+                try:
+                    await asyncio.to_thread(
+                        save_turn,
+                        user_id,
+                        history,
+                        utterance,
+                        f"{case['public_id']} 업무 건이 접수되었습니다.",
+                    )
+                except Exception:
+                    logger.warning("Case was created but conversation context was not persisted")
+            return JSONResponse(case_created_response(case))
 
         reply = await answer(utterance, history)
         if session_store_available:
