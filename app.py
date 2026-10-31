@@ -13,36 +13,47 @@ from openai import AsyncOpenAI
 
 load_dotenv()
 
-from agent import build_messages
-from session_store import check_database, clear_history, get_history, save_turn
+from agent import build_messages, fast_reply
+from session_store import (
+    check_database,
+    clear_history,
+    clear_user_data,
+    get_history,
+    save_turn,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("kakao-skill")
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-client = AsyncOpenAI(timeout=2.8, max_retries=0) if os.getenv("OPENAI_API_KEY") else None
+client = AsyncOpenAI(timeout=4.2, max_retries=0) if os.getenv("OPENAI_API_KEY") else None
 
 
-async def answer(utterance: str, history: list[dict[str, str]]) -> str:
-    """Run the mission agent, or provide a useful setup response without a model key."""
+async def answer(
+    utterance: str,
+    history: list[dict[str, str]],
+) -> str:
+    """Answer from deterministic policy first, then use the model for nuance."""
+    instant = fast_reply(utterance)
+    if instant:
+        return instant
     if utterance.strip() == "처음부터":
-        return "새 인터뷰를 시작할게요. 교동마을과 갯마을 중 어느 마을에서 어떤 역할을 맡고 계신가요?"
+        return "대화 기억을 초기화했어요. 주문·배송·환불·혜택·체험 중 어떤 도움이 필요하신가요?"
     if client is None:
         return (
-            "미션 인터뷰를 시작할 준비가 됐어요.\n"
-            "AI 답변 모델 키가 아직 설정되지 않았습니다. 서버의 OPENAI_API_KEY를 설정해 주세요.\n"
-            "먼저 교동마을/갯마을 중 어느 마을의 어떤 역할인지 알려주세요."
+            "현재 일반 정책 안내는 가능하지만 복합 문의를 처리할 AI 모델 연결이 준비되지 않았습니다. "
+            "잠시 후 다시 문의하시거나 상담 담당자 확인을 요청해 주세요."
         )
     try:
         result = await client.responses.create(
             model=MODEL,
             input=build_messages(history, utterance),
-            max_output_tokens=260,
+            max_output_tokens=320,
         )
-        return result.output_text.strip() or "답변을 만들지 못했어요. 다른 말로 질문해 주세요."
+        return result.output_text.strip() or "답변을 준비하지 못했어요. 문의 대상과 원하시는 처리를 한 문장으로 다시 남겨 주세요."
     except Exception:
         logger.exception("Mission agent generation failed")
-        return "답변을 준비하는 중 잠시 문제가 생겼어요. 방금 내용을 다시 보내 주세요."
+        return "지금은 확인이 지연되고 있어요. 잠시 후 다시 보내 주시거나 담당자 확인을 요청해 주세요."
 
 
 def kakao_response(text: str) -> dict:
@@ -90,6 +101,16 @@ async def skill(request: Request):
         if not utterance:
             return JSONResponse(kakao_response("질문 내용을 확인할 수 없어요. 다시 입력해 주세요."))
 
+        if user_id and "기록 삭제" in utterance:
+            try:
+                await asyncio.to_thread(clear_user_data, user_id)
+                return JSONResponse(
+                    kakao_response("저장된 조사 메모와 대화 기억을 삭제했어요. 카카오톡 채팅방의 과거 메시지는 별도로 남아 있을 수 있습니다.")
+                )
+            except Exception:
+                logger.warning("Could not delete stored user data")
+                return JSONResponse(kakao_response("기록을 삭제하지 못했어요. 잠시 후 다시 시도해 주세요."))
+
         reset_session = bool(user_id and utterance == "처음부터")
         session_store_available = bool(user_id)
         if reset_session:
@@ -103,19 +124,32 @@ async def skill(request: Request):
             try:
                 history = await asyncio.to_thread(get_history, user_id)
             except Exception:
-                logger.warning("Could not read conversation history; continuing statelessly")
+                logger.warning("Could not read stored context; continuing statelessly")
                 history = []
                 session_store_available = False
         else:
             # Never combine unrelated people into a shared anonymous history.
             history = []
 
+        first_message = bool(user_id and not history and not reset_session)
         reply = await answer(utterance, history)
+        if first_message:
+            reply = (
+                "안녕하세요, 교동마을 산지직송 AX 상담입니다. 대화 연결을 위해 최근 메시지를 저장하며, "
+                "‘기록 삭제’를 입력하면 서버의 대화 기록을 지울 수 있어요. 비밀번호·인증번호는 보내지 마세요.\n\n"
+                + reply
+            )
         if session_store_available:
             try:
-                await asyncio.to_thread(save_turn, user_id, history, "" if reset_session else utterance, reply)
+                await asyncio.to_thread(
+                    save_turn,
+                    user_id,
+                    history,
+                    "" if reset_session else utterance,
+                    reply,
+                )
             except Exception:
-                logger.warning("Could not persist conversation history")
+                logger.warning("Could not persist conversation")
         return JSONResponse(kakao_response(reply))
     except Exception:
         logger.exception("Kakao skill request failed")

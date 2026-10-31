@@ -1,4 +1,4 @@
-"""Supabase Postgres conversation storage for short-lived Vercel Functions."""
+"""Supabase Postgres memory for short-lived Vercel functions."""
 
 import json
 import os
@@ -11,8 +11,6 @@ def _connect() -> psycopg.Connection:
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
-    # Supabase's transaction pooler is intended for serverless workloads.
-    # Prepared statements are disabled because transaction mode does not support them.
     return psycopg.connect(
         database_url,
         connect_timeout=1,
@@ -24,7 +22,8 @@ def _connect() -> psycopg.Connection:
 def get_history(user_id: str) -> list[dict[str, str]]:
     with _connect() as connection:
         row = connection.execute(
-            "SELECT history FROM chatbot_sessions WHERE user_id = %s", (user_id,)
+            "SELECT history FROM public.chatbot_sessions WHERE user_id = %s",
+            (user_id,),
         ).fetchone()
     if not row:
         return []
@@ -46,7 +45,7 @@ def save_turn(
     with _connect() as connection:
         connection.execute(
             """
-            INSERT INTO chatbot_sessions (user_id, history, updated_at)
+            INSERT INTO public.chatbot_sessions (user_id, history, updated_at)
             VALUES (%s, %s, NOW())
             ON CONFLICT (user_id) DO UPDATE
             SET history = EXCLUDED.history, updated_at = NOW()
@@ -55,12 +54,19 @@ def save_turn(
         )
 
 
+def clear_user_data(user_id: str) -> None:
+    with _connect() as connection:
+        connection.execute("DELETE FROM public.chatbot_sessions WHERE user_id = %s", (user_id,))
+        connection.execute("DELETE FROM public.mission_evidence WHERE user_id = %s", (user_id,))
+
+
 def clear_history(user_id: str) -> None:
     with _connect() as connection:
-        connection.execute("DELETE FROM chatbot_sessions WHERE user_id = %s", (user_id,))
+        connection.execute("DELETE FROM public.chatbot_sessions WHERE user_id = %s", (user_id,))
 
 
 def check_database() -> bool:
     with _connect() as connection:
-        connection.execute("SELECT 1 FROM chatbot_sessions LIMIT 1").fetchone()
+        connection.execute("SELECT 1 FROM public.chatbot_sessions LIMIT 1").fetchone()
+        connection.execute("SELECT 1 FROM public.mission_evidence LIMIT 1").fetchone()
     return True
