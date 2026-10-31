@@ -29,6 +29,7 @@ CATEGORY_LABELS = {
 }
 
 STATUS_LABELS = {
+    "NEEDS_INFO": "정보 확인 필요",
     "RECEIVED": "접수됨",
     "IN_REVIEW": "담당자 검토 중",
     "AWAITING_APPROVAL": "승인 대기",
@@ -42,6 +43,19 @@ def intake_category(utterance: str) -> str | None:
     """Return the explicitly requested workflow category, if any."""
     normalized = re.sub(r"\s+", " ", utterance).strip()
     return INTAKE_ACTIONS.get(normalized)
+
+
+def explicit_intake_intent(utterance: str) -> bool:
+    """Require an affirmative action phrase before creating a case automatically."""
+    normalized = re.sub(r"\s+", " ", utterance).strip().lower()
+    if any(word in normalized for word in ("가능해", "되나요", "할 수", "어떻게", "방법")):
+        return False
+    return bool(
+        re.search(
+            r"(?:접수|신청|신고|이관|처리)\s*(?:해\s*줘|해\s*주세요|해주세요|해줘요|할게|하겠습니다|진행해\s*줘)",
+            normalized,
+        )
+    )
 
 
 def _latest_user_context(history: list[dict[str, str]]) -> str:
@@ -91,40 +105,61 @@ def build_case_draft(
     category: str,
     history: list[dict[str, str]],
     utterance: str,
+    analysis: dict | None = None,
 ) -> dict:
     """Build an auditable routing decision from the user's recent context."""
+    analysis = analysis or {}
+    analyzed_category = str(analysis.get("category") or "GENERAL")
+    if analyzed_category not in CATEGORY_LABELS:
+        analyzed_category = "GENERAL"
+    # Safety signals override a less severe button. For a generic intake action,
+    # use the model's category; specific non-safety buttons remain authoritative.
+    if analyzed_category == "SAFETY":
+        category = "SAFETY"
+    elif category == "GENERAL" and analyzed_category != "GENERAL":
+        category = analyzed_category
+
     context = _latest_user_context(history)
-    summary = _redact_credentials(context or utterance)
-    combined = f"{context} {utterance}".lower()
+    analyzed_summary = str(analysis.get("summary") or "").strip()
+    summary = _redact_credentials(analyzed_summary or context or utterance)
+    combined = f"{context} {utterance} {analyzed_summary}".lower()
 
     assignee = "이민준"
     priority = "NORMAL"
     requires_approval = False
     approver_role: str | None = None
-    missing_fields: list[str] = []
+    missing_fields = [
+        str(field).strip()
+        for field in analysis.get("missing_fields", [])
+        if str(field).strip()
+    ][:8]
+
+    def require(field: str) -> None:
+        if field not in missing_fields:
+            missing_fields.append(field)
 
     if category == "SHIPPING":
         assignee = "구방만"
         if not _has_order_reference(combined):
-            missing_fields.append("주문번호")
+            require("주문번호")
     elif category == "QUALITY":
         assignee = "박수복"
         priority = "HIGH"
         if not _has_order_reference(combined):
-            missing_fields.append("주문번호")
+            require("주문번호")
     elif category == "SAFETY":
         assignee = "이민준"
         priority = "URGENT"
         requires_approval = True
         approver_role = "고길동"
         if not _has_order_reference(combined):
-            missing_fields.append("주문번호")
+            require("주문번호")
         if not any(word in combined for word in ("곰팡이", "부패", "이물", "복통", "배탈", "병원", "상했")):
-            missing_fields.append("문제 증상 또는 상품 상태")
+            require("문제 증상 또는 상품 상태")
     elif category == "PROMOTION":
         assignee = "홍보라"
         if not _has_order_reference(combined):
-            missing_fields.append("주문번호 또는 혜택 코드")
+            require("주문번호 또는 혜택 코드")
         if any(word in combined for word in ("12만원", "120,000", "무조건 무료배송", "예외", "분쟁")):
             priority = "HIGH"
             requires_approval = True
@@ -133,26 +168,56 @@ def build_case_draft(
         assignee = "김청년"
         requires_approval = True
         approver_role = "고길동"
-        missing_fields = _experience_missing_fields(combined)
+        for field in _experience_missing_fields(combined):
+            require(field)
     elif category == "PRIVACY":
         assignee = "이민준"
         priority = "HIGH"
         if not any(word in combined for word in ("정정", "삭제", "열람", "동의", "개인정보")):
-            missing_fields.append("요청 유형(열람·정정·삭제)")
+            require("요청 유형(열람·정정·삭제)")
     elif category == "GENERAL" and not context:
-        missing_fields.append("문의 내용")
+        require("문의 내용")
+
+    risk_level = str(analysis.get("risk_level") or "LOW")
+    if risk_level == "CRITICAL":
+        priority = "URGENT"
+        requires_approval = True
+        approver_role = "고길동"
+    elif risk_level == "HIGH" and priority == "NORMAL":
+        priority = "HIGH"
+
+    confidence = analysis.get("confidence", 0.0)
+    try:
+        confidence = max(0.0, min(float(confidence), 1.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    decision_source = "AI_VALIDATED" if analysis.get("source") == "AI" else "RULES"
+    intent_label = str(analysis.get("intent_label") or CATEGORY_LABELS[category])[:120]
+    routing_reason = (
+        f"{intent_label} 의도를 분석하고 {CATEGORY_LABELS[category]} 업무 규칙으로 검증"
+        if decision_source == "AI_VALIDATED"
+        else f"{CATEGORY_LABELS[category]} 접수 규칙으로 분류"
+    )
 
     return {
         "public_id": f"AX-{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}",
         "category": category,
         "title": CATEGORY_LABELS[category],
         "summary": summary,
-        "status": "RECEIVED",
+        "status": "NEEDS_INFO" if missing_fields else "RECEIVED",
         "priority": priority,
         "assignee_role": assignee,
         "requires_approval": requires_approval,
         "approver_role": approver_role,
         "missing_fields": missing_fields,
+        "analysis": {
+            key: value
+            for key, value in analysis.items()
+            if key not in {"reply"}
+        },
+        "confidence": confidence,
+        "routing_reason": routing_reason,
+        "decision_source": decision_source,
     }
 
 

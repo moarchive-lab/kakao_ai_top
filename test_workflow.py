@@ -1,6 +1,6 @@
 import unittest
 
-from workflow import build_case_draft, intake_category, status_label
+from workflow import build_case_draft, explicit_intake_intent, intake_category, status_label
 
 
 class WorkflowTest(unittest.TestCase):
@@ -51,6 +51,35 @@ class WorkflowTest(unittest.TestCase):
 
     def test_status_has_customer_label(self):
         self.assertEqual(status_label("AWAITING_APPROVAL"), "승인 대기")
+
+    def test_ai_analysis_is_validated_by_routing_rules(self):
+        analysis = {
+            "category": "SAFETY",
+            "intent_label": "섭취 후 복통 신고",
+            "summary": "주문번호 KD-7777 상품 섭취 후 복통",
+            "risk_level": "CRITICAL",
+            "missing_fields": [],
+            "confidence": 0.96,
+            "source": "AI",
+        }
+        draft = build_case_draft("GENERAL", [], "이 내용 접수해줘", analysis)
+        self.assertEqual(draft["category"], "SAFETY")
+        self.assertEqual(draft["priority"], "URGENT")
+        self.assertEqual(draft["decision_source"], "AI_VALIDATED")
+        self.assertEqual(draft["status"], "RECEIVED")
+
+    def test_missing_required_data_enters_needs_info(self):
+        draft = build_case_draft(
+            "SHIPPING",
+            [{"role": "user", "content": "배송이 멈춘 것 같아요"}],
+            "배송 확인 접수",
+        )
+        self.assertEqual(draft["status"], "NEEDS_INFO")
+        self.assertIn("주문번호", draft["missing_fields"])
+
+    def test_natural_intake_requires_affirmative_language(self):
+        self.assertTrue(explicit_intake_intent("이 내용으로 접수해 주세요"))
+        self.assertFalse(explicit_intake_intent("접수할 수 있나요?"))
 
 
 if __name__ == "__main__":

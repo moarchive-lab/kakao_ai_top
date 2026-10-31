@@ -3,8 +3,12 @@
 CREATE TABLE IF NOT EXISTS public.chatbot_sessions (
     user_id TEXT PRIMARY KEY,
     history JSONB NOT NULL DEFAULT '[]'::jsonb,
+    last_analysis JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.chatbot_sessions
+    ADD COLUMN IF NOT EXISTS last_analysis JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS chatbot_sessions_updated_at_idx
     ON public.chatbot_sessions (updated_at DESC);
@@ -26,7 +30,7 @@ CREATE TABLE IF NOT EXISTS public.ax_cases (
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'RECEIVED' CHECK (
-        status IN ('RECEIVED', 'IN_REVIEW', 'AWAITING_APPROVAL', 'RESOLVED', 'REJECTED', 'CANCELLED')
+        status IN ('NEEDS_INFO', 'RECEIVED', 'IN_REVIEW', 'AWAITING_APPROVAL', 'RESOLVED', 'REJECTED', 'CANCELLED')
     ),
     priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK (
         priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')
@@ -34,8 +38,28 @@ CREATE TABLE IF NOT EXISTS public.ax_cases (
     assignee_role TEXT NOT NULL,
     requires_approval BOOLEAN NOT NULL DEFAULT FALSE,
     missing_fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+    analysis JSONB NOT NULL DEFAULT '{}'::jsonb,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+    routing_reason TEXT NOT NULL DEFAULT '',
+    decision_source TEXT NOT NULL DEFAULT 'RULES' CHECK (
+        decision_source IN ('RULES', 'AI_VALIDATED')
+    ),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.ax_cases ADD COLUMN IF NOT EXISTS analysis JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE public.ax_cases ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE public.ax_cases ADD COLUMN IF NOT EXISTS routing_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE public.ax_cases ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'RULES';
+
+ALTER TABLE public.ax_cases DROP CONSTRAINT IF EXISTS ax_cases_status_check;
+ALTER TABLE public.ax_cases ADD CONSTRAINT ax_cases_status_check CHECK (
+    status IN ('NEEDS_INFO', 'RECEIVED', 'IN_REVIEW', 'AWAITING_APPROVAL', 'RESOLVED', 'REJECTED', 'CANCELLED')
+);
+ALTER TABLE public.ax_cases DROP CONSTRAINT IF EXISTS ax_cases_decision_source_check;
+ALTER TABLE public.ax_cases ADD CONSTRAINT ax_cases_decision_source_check CHECK (
+    decision_source IN ('RULES', 'AI_VALIDATED')
 );
 
 CREATE INDEX IF NOT EXISTS ax_cases_user_created_idx

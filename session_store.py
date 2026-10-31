@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -21,16 +22,29 @@ def _connect() -> psycopg.Connection:
     )
 
 
-def get_history(user_id: str) -> list[dict[str, str]]:
+def get_session(user_id: str) -> dict:
     with _connect() as connection:
         row = connection.execute(
-            "SELECT history FROM public.chatbot_sessions WHERE user_id = %s",
+            "SELECT history, last_analysis FROM public.chatbot_sessions WHERE user_id = %s",
             (user_id,),
         ).fetchone()
     if not row:
-        return []
-    history = row[0]
-    return json.loads(history) if isinstance(history, str) else history
+        return {"history": [], "last_analysis": {}}
+    history = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+    analysis = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+    return {"history": history or [], "last_analysis": analysis or {}}
+
+
+def get_history(user_id: str) -> list[dict[str, str]]:
+    return get_session(user_id)["history"]
+
+
+def _safe_user_text(text: str) -> str:
+    return re.sub(
+        r"(?i)(비밀번호|패스워드|password|otp|인증번호)\s*[:：=]?\s*\S+",
+        lambda match: f"{match.group(1)} [저장하지 않음]",
+        text,
+    )
 
 
 def save_turn(
@@ -38,21 +52,28 @@ def save_turn(
     history: list[dict[str, str]],
     user_text: str,
     answer: str,
+    analysis: dict | None = None,
 ) -> None:
     additions = []
     if user_text:
-        additions.append({"role": "user", "content": user_text})
+        additions.append({"role": "user", "content": _safe_user_text(user_text)})
     additions.append({"role": "assistant", "content": answer})
     updated_history = [*history, *additions][-12:]
+    analysis_payload = analysis if analysis is not None else {}
     with _connect() as connection:
         connection.execute(
             """
-            INSERT INTO public.chatbot_sessions (user_id, history, updated_at)
-            VALUES (%s, %s, NOW())
+            INSERT INTO public.chatbot_sessions (user_id, history, last_analysis, updated_at)
+            VALUES (%s, %s, %s, NOW())
             ON CONFLICT (user_id) DO UPDATE
-            SET history = EXCLUDED.history, updated_at = NOW()
+            SET history = EXCLUDED.history,
+                last_analysis = CASE
+                    WHEN %s THEN EXCLUDED.last_analysis
+                    ELSE public.chatbot_sessions.last_analysis
+                END,
+                updated_at = NOW()
             """,
-            (user_id, Jsonb(updated_history)),
+            (user_id, Jsonb(updated_history), Jsonb(analysis_payload), analysis is not None),
         )
 
 
@@ -68,7 +89,11 @@ def _case_record(row: tuple) -> dict:
         "assignee_role": row[7],
         "requires_approval": row[8],
         "missing_fields": row[9] if not isinstance(row[9], str) else json.loads(row[9]),
-        "created_at": row[10],
+        "analysis": row[10] if not isinstance(row[10], str) else json.loads(row[10]),
+        "confidence": row[11],
+        "routing_reason": row[12],
+        "decision_source": row[13],
+        "created_at": row[14],
     }
 
 
@@ -82,7 +107,7 @@ def create_case(user_id: str, draft: dict) -> dict:
             """
             SELECT case_id, public_id, category, title, summary, status,
                    priority, assignee_role, requires_approval, missing_fields,
-                   created_at
+                   analysis, confidence, routing_reason, decision_source, created_at
             FROM public.ax_cases
             WHERE user_id = %s AND category = %s AND summary = %s
               AND created_at >= NOW() - INTERVAL '2 minutes'
@@ -100,12 +125,13 @@ def create_case(user_id: str, draft: dict) -> dict:
             """
             INSERT INTO public.ax_cases (
                 public_id, user_id, category, title, summary, status, priority,
-                assignee_role, requires_approval, missing_fields
+                assignee_role, requires_approval, missing_fields, analysis,
+                confidence, routing_reason, decision_source
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING case_id, public_id, category, title, summary, status,
                       priority, assignee_role, requires_approval, missing_fields,
-                      created_at
+                      analysis, confidence, routing_reason, decision_source, created_at
             """,
             (
                 draft["public_id"],
@@ -118,6 +144,10 @@ def create_case(user_id: str, draft: dict) -> dict:
                 draft["assignee_role"],
                 draft["requires_approval"],
                 Jsonb(draft["missing_fields"]),
+                Jsonb(draft.get("analysis") or {}),
+                draft.get("confidence", 0),
+                draft.get("routing_reason", ""),
+                draft.get("decision_source", "RULES"),
             ),
         ).fetchone()
         case = _case_record(row)
@@ -135,6 +165,9 @@ def create_case(user_id: str, draft: dict) -> dict:
                         "priority": case["priority"],
                         "assignee_role": case["assignee_role"],
                         "missing_fields": case["missing_fields"],
+                        "decision_source": case["decision_source"],
+                        "confidence": case["confidence"],
+                        "routing_reason": case["routing_reason"],
                     }
                 ),
             ),
@@ -193,8 +226,15 @@ def clear_history(user_id: str) -> None:
 
 def check_database() -> bool:
     with _connect() as connection:
-        connection.execute("SELECT 1 FROM public.chatbot_sessions LIMIT 1").fetchone()
-        connection.execute("SELECT 1 FROM public.ax_cases LIMIT 1").fetchone()
+        connection.execute(
+            "SELECT history, last_analysis FROM public.chatbot_sessions LIMIT 1"
+        ).fetchone()
+        connection.execute(
+            """
+            SELECT analysis, confidence, routing_reason, decision_source
+            FROM public.ax_cases LIMIT 1
+            """
+        ).fetchone()
         connection.execute("SELECT 1 FROM public.ax_case_events LIMIT 1").fetchone()
         connection.execute("SELECT 1 FROM public.ax_approvals LIMIT 1").fetchone()
     return True
